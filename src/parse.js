@@ -34,6 +34,13 @@ export function unflatten(parsed, revivers) {
 	const hydrated = Array(values.length);
 
 	/**
+	 * A set of values currently being hydrated with custom revivers,
+	 * used to detect invalid cyclical dependencies
+	 * @type {Set<number> | null}
+	 */
+	let hydrating = null;
+
+	/**
 	 * @param {number} index
 	 * @returns {any}
 	 */
@@ -58,7 +65,18 @@ export function unflatten(parsed, revivers) {
 
 				const reviver = revivers?.[type];
 				if (reviver) {
-					return (hydrated[index] = reviver(hydrate(value[1])));
+					const i = value[1];
+					hydrating ??= new Set();
+
+					if (hydrating.has(i)) {
+						throw new Error('Invalid circular reference');
+					}
+
+					hydrating.add(i);
+					hydrated[index] = reviver(hydrate(i));
+					hydrating.delete(i);
+
+					return hydrated[index];
 				}
 
 				switch (type) {
@@ -102,31 +120,47 @@ export function unflatten(parsed, revivers) {
 						}
 						break;
 
-          case "Int8Array":
-          case "Uint8Array":
-          case "Uint8ClampedArray":
-          case "Int16Array":
-          case "Uint16Array":
-          case "Int32Array":
-          case "Uint32Array":
-          case "Float32Array":
-          case "Float64Array":
-          case "BigInt64Array":
-          case "BigUint64Array": {
-            const TypedArrayConstructor = globalThis[type];
-            const base64 = value[1];
-            const arraybuffer = decode64(base64);
-            const typedArray = new TypedArrayConstructor(arraybuffer);
-            hydrated[index] = typedArray;
-            break;
-          }
+					case 'Int8Array':
+					case 'Uint8Array':
+					case 'Uint8ClampedArray':
+					case 'Int16Array':
+					case 'Uint16Array':
+					case 'Int32Array':
+					case 'Uint32Array':
+					case 'Float32Array':
+					case 'Float64Array':
+					case 'BigInt64Array':
+					case 'BigUint64Array': {
+						if (values[value[1]][0] !== 'ArrayBuffer') {
+							// without this, if we receive malformed input we could
+							// end up trying to hydrate in a circle
+							throw new Error('Invalid data');
+						}
 
-          case "ArrayBuffer": {
-            const base64 = value[1];
-            const arraybuffer = decode64(base64);
-            hydrated[index] = arraybuffer;
-            break;
-          }
+						const TypedArrayConstructor = globalThis[type];
+						const buffer = hydrate(value[1]);
+						if (!(buffer instanceof ArrayBuffer)) {
+							throw new Error(`Invalid input, expected ArrayBuffer but got ${typeof buffer}`);
+						}
+						const typedArray = new TypedArrayConstructor(buffer);
+
+						hydrated[index] =
+							value[2] !== undefined
+								? typedArray.subarray(value[2], value[3])
+								: typedArray;
+
+						break;
+					}
+
+					case 'ArrayBuffer': {
+						const base64 = value[1];
+						if (typeof base64 !== 'string') {
+							throw new Error('Invalid ArrayBuffer encoding');
+						}
+						const arraybuffer = decode64(base64);
+						hydrated[index] = arraybuffer;
+						break;
+					}
 
 					default:
 						throw new Error(`Unknown type ${type}`);
